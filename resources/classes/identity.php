@@ -9,23 +9,76 @@
  * RFC 8228 - Authentication, Authorization, and Accounting for the
  *			Secure Telephone Identity (STI)
  */
+/**
+ * Identity STIR/SHAKEN PASSporT signing and verification.
+ *
+ * Signs outgoing phone calls with STIR/SHAKEN PASSporT tokens to authenticate
+ * call origins and prevent caller ID spoofing. Implements RFC 8225 (PASSporT) and
+ * RFC 8228 (Authentication, Authorization, and Accounting for STI).
+ *
+ * @license See LICENSE file
+ */
 class identity {
 
-	// Error message response
+	/**
+	 * Error message from verification or signing operations.
+	 *
+	 * @var string
+	 */
 	public $error_message = '';
+
+	/**
+	 * Attestation level from verified PASSporT token.
+	 *
+	 * @var string
+	 */
 	public $attest_level = '';
 
-	// Configuration properties
+	/**
+	 * Path to the private key file for signing.
+	 *
+	 * @var string
+	 */
 	private $private_key_path = '';
+
+	/**
+	 * Path to the certificate file for signing.
+	 *
+	 * @var string
+	 */
 	private $certificate_path = '';
+
+	/**
+	 * URL to download the public certificate during verification.
+	 *
+	 * @var string
+	 */
 	private $certificate_url = '';
+
+	/**
+	 * Default attestation level (A, B, or C) for new PASSporTs.
+	 *
+	 * @var string
+	 */
 	private $default_attest_level = 'C';
+
+	/**
+	 * Signature algorithm (ES256 for P-256 curve).
+	 *
+	 * @var string
+	 */
 	private $algorithm = 'ES256';
 
 	/**
-	 * Constructor - Initialize with configuration
+	 * Initialize with configuration settings.
 	 *
-	 * @param array $setting_array Setting array
+	 * Loads certificate and key paths from the provided configuration array. Sets
+	 * up instance properties for signing and verification operations.
+	 *
+	 * @param array $setting_array Configuration array with keys: private_key_path,
+	 *                               certificate_path, certificate_url
+	 *
+	 * @return void
 	 */
 	public function __construct(array $setting_array = []) {
 		// Load default configuration
@@ -35,7 +88,14 @@ class identity {
 	}
 
 	/**
-	 * Set custom configuration
+	 * Set custom configuration properties dynamically.
+	 *
+	 * Updates instance properties with values from the configuration array. Only
+	 * properties that exist on the class are updated.
+	 *
+	 * @param array $config Configuration array with property names and values
+	 *
+	 * @return void
 	 */
 	public function set_config(array $config) {
 		foreach ($config as $key => $value) {
@@ -46,7 +106,13 @@ class identity {
 	}
 
 	/**
-	 * Get configuration
+	 * Get current configuration as associative array.
+	 *
+	 * Returns all configuration properties including private key path, certificate
+	 * path, URL, attestation level, and algorithm.
+	 *
+	 * @return array Configuration array with keys: private_key_path, certificate_path,
+	 *               certificate_url, attest_level, algorithm
 	 */
 	public function get_config() {
 		return [
@@ -59,14 +125,20 @@ class identity {
 	}
 
 	/**
-	 * Sign a call and generate PASSporT token
+	 * Sign a call with a STIR/SHAKEN PASSporT token.
 	 *
-	 * @param string $orig_tn Originator phone number (e.g., "1234567890")
-	 * @param string $dest_tn Destination phone number (e.g., "0987654321")
-	 * @param string $attest_level Attestation level: A, B, or C
-	 * @param string $origid Optional originator ID (UUID)
-	 * @param int $iat Optional issued-at timestamp
-	 * @return array ['passport' => string, 'error' => string|null]
+	 * Generates a PASSporT token for the given call parameters using the configured
+	 * private key. Returns the signed JWT or an error message if signing fails.
+	 * Uses current time if iat is not provided and generates a UUID if origid is
+	 * not provided.
+	 *
+	 * @param string $orig_tn      Originator phone number (e.g., "1234567890")
+	 * @param string $dest_tn      Destination phone number (e.g., "0987654321")
+	 * @param string $attest_level Attestation level (A, B, or C); uses default if empty
+	 * @param string $origid       Optional originator UUID; generated if empty
+	 * @param int    $iat          Optional issued-at timestamp; uses current time if zero
+	 *
+	 * @return array Array with keys: passport (string), error (string|null)
 	 */
 	public function sign(string $orig_tn, string $dest_tn, string $attest_level = '', string $origid = '', int $iat = 0): array {
 
@@ -104,7 +176,15 @@ class identity {
 	}
 
 	/**
-	 * Verify the signature using the algorithm and public key
+	 * Verify a PASSporT token signature and extract attestation level.
+	 *
+	 * Validates the JWT format, downloads the public certificate from the header
+	 * URL, extracts the public key, and verifies the ECDSA signature. Sets
+	 * error_message and attest_level properties on success or failure.
+	 *
+	 * @param string $identity_header The signed PASSporT token (JWT format)
+	 *
+	 * @return bool True if signature is valid, false otherwise
 	 */
 	public function verify($identity_header): bool {
 
@@ -254,7 +334,13 @@ class identity {
 	}
 
 	/**
-	 * Build PASSporT header
+	 * Build JWT header with algorithm and certificate information.
+	 *
+	 * Creates a standard STIR/SHAKEN JWT header array with algorithm (ES256),
+	 * passport type indicator (shaken), JWT type indicator (passport), and the
+	 * certificate URL for public key retrieval during verification.
+	 *
+	 * @return array Header array with keys: alg, ppt, typ, x5u
 	 */
 	private function build_header(): array {
 		return [
@@ -266,7 +352,19 @@ class identity {
 	}
 
 	/**
-	 * Build PASSporT payload
+	 * Build JWT payload with call and attestation information.
+	 *
+	 * Creates the STIR/SHAKEN JWT payload structure containing originator and
+	 * destination phone numbers, attestation level, issued-at timestamp, and
+	 * originator identifier.
+	 *
+	 * @param string $orig_tn  Originator phone number
+	 * @param string $dest_tn  Destination phone number
+	 * @param string $attest   Attestation level (A, B, or C)
+	 * @param int    $iat      Issued-at Unix timestamp
+	 * @param string $origid   Originator UUID identifier
+	 *
+	 * @return array Payload array with keys: attest, dest, iat, orig, origid
 	 */
 	private function build_payload(string $orig_tn, string $dest_tn, string $attest, int $iat, string $origid): array {
 		$payload = [
@@ -281,7 +379,16 @@ class identity {
 	}
 
 	/**
-	 * Sign the PASSporT token
+	 * Sign header and payload and create complete PASSporT token.
+	 *
+	 * Encodes header and payload to base64url, signs the concatenation with the
+	 * configured private key using ECDSA SHA256, converts the signature from DER
+	 * to IEEE P1363 format, and returns the complete JWT.
+	 *
+	 * @param array $header Header array to encode
+	 * @param array $payload Payload array to encode
+	 *
+	 * @return array Array with keys: passport (string), error (string|null)
 	 */
 	private function sign_passport(array $header, array $payload): array {
 		// Encode header and payload to base64url
@@ -325,7 +432,12 @@ class identity {
 	}
 
 	/**
-	 * Load private key from file
+	 * Load private key from configured file path.
+	 *
+	 * Reads the private key PEM file and returns an OpenSSL resource. Returns
+	 * false if the file path is empty or the key cannot be loaded.
+	 *
+	 * @return \OpenSSLAsymmetricKey|false OpenSSL private key resource or false on failure
 	 */
 	private function load_private_key() {
 		if (empty($this->private_key_path)) {
@@ -341,11 +453,14 @@ class identity {
 	}
 
 	/**
-	 * Generate SIP Identity header from PASSporT
+	 * Build complete SIP Identity header from PASSporT token.
 	 *
-	 * Format: Identity: <PASSporT>;info="<certificate_url>;alg=ES256;ppt=shaken"
+	 * Constructs the Identity header value with the PASSporT token and optional
+	 * parameters including certificate URL, algorithm, and passport type indicator.
+	 * Format: PASSporT;info="certificate_url;alg=ES256;ppt=shaken"
 	 *
-	 * @param string $passport The signed PASSporT token
+	 * @param string $passport The signed PASSporT JWT token
+	 *
 	 * @return string The complete SIP Identity header value
 	 */
 	public function build_identity_header(string $passport): string {
@@ -354,12 +469,17 @@ class identity {
 	}
 
 	/**
-	 * Generate a complete SIP Identity header
+	 * Sign call and create complete SIP Identity header.
 	 *
-	 * @param string $orig_tn Originator phone number
-	 * @param string $dest_tn Destination phone number
-	 * @param string $attest_level Attestation level
-	 * @return array ['Identity' => string, 'error' => string|null]
+	 * Calls sign() to generate the PASSporT token, then calls
+	 * build_identity_header() to create the complete SIP Identity header value.
+	 * Returns error from signing if it fails.
+	 *
+	 * @param string $orig_tn      Originator phone number
+	 * @param string $dest_tn      Destination phone number
+	 * @param string $attest_level Attestation level (A, B, or C); defaults to C
+	 *
+	 * @return array Array with keys: Identity (string), error (string|null)
 	 */
 	public function sign_and_build_header(string $orig_tn, string $dest_tn, string $attest_level = ''): array {
 		// Sign the call
@@ -376,14 +496,28 @@ class identity {
 	}
 
 	/**
-	 * Base64url encode (RFC 7515)
+	 * Encode data to base64url format per RFC 7515.
+	 *
+	 * Applies standard base64 encoding and then replaces URL-unsafe characters
+	 * (+/ becomes -_) and removes padding (=).
+	 *
+	 * @param string $data Raw data to encode
+	 *
+	 * @return string Base64url-encoded string
 	 */
 	public function base64_url_encode(string $data): string {
 		return rtrim(strtr(base64_encode($data), '+/', '-_'), '=');
 	}
 
 	/**
-	 * Base64url decode (RFC 7515)
+	 * Decode base64url-encoded data per RFC 7515.
+	 *
+	 * Restores URL-safe characters (-_ back to +/) and adds padding if needed
+	 * before applying standard base64 decoding.
+	 *
+	 * @param string $data Base64url-encoded string
+	 *
+	 * @return string Raw decoded data
 	 */
 	public function base64_url_decode(string $data): string {
 		$padding = 4 - (strlen($data) % 4);
@@ -394,10 +528,15 @@ class identity {
 	}
 
 	/**
-	 * Convert DER-encoded ECDSA signature to raw R||S format
+	 * Convert DER-encoded ECDSA signature to raw IEEE P1363 format.
 	 *
-	 * Parses the ASN.1 DER structure and extracts the R and S components.
-	 * Automatically detects P-256 (32 bytes each) or P-384 (48 bytes each) curves.
+	 * Parses ASN.1 DER structure to extract R and S components. Automatically
+	 * detects P-256 (32 bytes each) or P-384 (48 bytes each) curves and pads
+	 * components accordingly.
+	 *
+	 * @param string $der DER-encoded signature bytes
+	 *
+	 * @return string|false Raw R||S signature or false if parsing fails
 	 */
 	private function der_to_raw(string $der): string|false {
 		$pos = 0;
@@ -450,9 +589,18 @@ class identity {
 	}
 
 	/**
-	* Convert a raw IEEE P1363 ECDSA signature (R || S) to DER/ASN.1 format.
-	* Supports both P-256 (64 bytes) and P-384 (96 bytes) curves.
-	*/
+	 * Convert IEEE P1363 ECDSA signature to DER/ASN.1 format.
+	 *
+	 * Accepts 64-byte (P-256) or 96-byte (P-384) raw signatures and encodes to
+	 * DER format required by OpenSSL verification. Handles leading zero bytes
+	 * for positive integer representation.
+	 *
+	 * @param string $signature Raw IEEE P1363 signature (R || S)
+	 *
+	 * @return string DER-encoded signature
+	 *
+	 * @throws Exception If signature length is not 64 or 96 bytes
+	 */
 	function p1363_to_der($signature) {
 		$sig_len = strlen($signature);
 
@@ -480,17 +628,14 @@ class identity {
 		return "\x30" . chr(strlen($seq)) . $seq;
 	}
 
-    /**
-	 * Generates a unique identifier (UUID) based on the operating system.
+	/**
+	 * Generate unique identifier using platform-specific methods.
 	 *
-	 * This function tries to generate a UUID using platform-specific methods:
-	 * - On FreeBSD, it uses `uuidgen`.
-	 * - On Linux, it first attempts to read from `/proc/sys/kernel/random/uuid`, then falls back to `uuidgen`.
-	 * - On Windows, it uses the `com_create_guid()` function.
+	 * Attempts to generate a UUID using OS-specific methods: uuidgen on FreeBSD
+	 * and Linux (/proc/sys/kernel/random/uuid then uuidgen), com_create_guid on
+	 * Windows. Exits with error message if generation fails.
 	 *
-	 * If none of these methods succeed, an error message is displayed, and the script exits.
-	 *
-	 * @return string The generated UUID as a string.
+	 * @return string Generated UUID as a string
 	 */
 	private function generate_uuid(): string {
 		$uuid = null;
@@ -538,7 +683,7 @@ class identity {
 	 * Note: This method uses openssl command-line tool for key generation
 	 * to support P-256 (ES256) properly across all OpenSSL versions.
 	 *
-	 * @param string $output_dir Directory to save key and certificate
+	 * @param string $output_dir  Directory to save key and certificate
 	 * @param string $common_name Common name for the certificate
 	 * @return array ['private_key_path' => string, 'certificate_path' => string, 'error' => string|null]
 	 */
