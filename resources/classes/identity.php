@@ -363,7 +363,7 @@ class identity {
 	 */
 	public function sign_and_build_header(string $orig_tn, string $dest_tn, string $attest_level = ''): array {
 		// Sign the call
-		$sign_result = $this->sign_call($orig_tn, $dest_tn, $attest_level);
+		$sign_result = $this->sign($orig_tn, $dest_tn, $attest_level);
 
 		if (!empty($sign_result['error'])) {
 			return ['Identity' => '', 'error' => $sign_result['error']];
