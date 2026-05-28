@@ -1,0 +1,640 @@
+<?php
+/**
+ * STIR/SHAKEN Call Sign and Verify Module for FusionPBX
+ *
+ * This module signs outgoing phone calls with STIR/SHAKEN PASSporT tokens
+ * to authenticate call origins and prevent caller ID spoofing.
+ *
+ * RFC 8225 - PASSporT (PASSport for Telephone Identity)
+ * RFC 8228 - Authentication, Authorization, and Accounting for the
+ *			Secure Telephone Identity (STI)
+ */
+class identity {
+
+	// Error message response
+	public $error_message = '';
+	public $attest_level = '';
+
+	// Configuration properties
+	private $private_key_path = '';
+	private $certificate_path = '';
+	private $certificate_url = '';
+	private $default_attest_level = 'C';
+	private $algorithm = 'ES256';
+
+	/**
+	 * Constructor - Initialize with configuration
+	 *
+	 * @param array $setting_array Setting array
+	 */
+	public function __construct(array $setting_array = []) {
+		// Load default configuration
+		$this->private_key_path = $setting_array['private_key_path'] ?? '';
+		$this->certificate_path = $setting_array['certificate_path'] ?? '';
+		$this->certificate_url = $setting_array['certificate_url'] ?? '';
+	}
+
+	/**
+	 * Set custom configuration
+	 */
+	public function set_config(array $config) {
+		foreach ($config as $key => $value) {
+			if (property_exists($this, $key)) {
+				$this->$key = $value;
+			}
+		}
+	}
+
+	/**
+	 * Get configuration
+	 */
+	public function get_config() {
+		return [
+			'private_key_path' => $this->private_key_path,
+			'certificate_path' => $this->certificate_path,
+			'certificate_url' => $this->certificate_url,
+			'attest_level' => $this->default_attest_level,
+			'algorithm' => $this->algorithm
+		];
+	}
+
+	/**
+	 * Sign a call and generate PASSporT token
+	 *
+	 * @param string $orig_tn Originator phone number (e.g., "1234567890")
+	 * @param string $dest_tn Destination phone number (e.g., "0987654321")
+	 * @param string $attest_level Attestation level: A, B, or C
+	 * @param string $origid Optional originator ID (UUID)
+	 * @param int $iat Optional issued-at timestamp
+	 * @return array ['passport' => string, 'error' => string|null]
+	 */
+	public function sign(string $orig_tn, string $dest_tn, string $attest_level = '', string $origid = '', int $iat = 0): array {
+
+		// Validate inputs
+		if (empty($orig_tn)) {
+			return ['passport' => '', 'error' => 'Missing originator phone number'];
+		}
+		if (empty($dest_tn)) {
+			return ['passport' => '', 'error' => 'Missing destination phone number'];
+		}
+		if (empty($attest_level) || !in_array($attest_level, ['A', 'B', 'C'])) {
+			$attest_level = $this->default_attest_level;
+		}
+
+		// Generate origid if not provided
+		if (empty($origid)) {
+			$origid = $this->generate_uuid();
+		}
+
+		// Use current time if iat not provided
+		if ($iat === 0) {
+			$iat = time();
+		}
+
+		// Build PASSporT header
+		$header = $this->build_header();
+
+		// Build PASSporT payload
+		$payload = $this->build_payload($orig_tn, $dest_tn, $attest_level, $iat, $origid);
+
+		// Sign the PASSporT
+		$result = $this->sign_passport($header, $payload);
+
+		return $result;
+	}
+
+	/**
+	 * Verify the signature using the algorithm and public key
+	 */
+	public function verify($identity_header): bool {
+
+		// Split the token into its 3 parts
+		$parts = preg_split('/\./', $identity_header);
+
+		if (count($parts) < 3) {
+			$this->error_message = "Invalid PASSporT format.";
+			return false;
+		}
+
+		// Extract header, payload, and signature
+		$header_b64 = $parts[0];
+		$payload_b64 = $parts[1];
+		$signature_b64 = $parts[2];
+
+		// Remove signature parameters (everything after the first semicolon)
+		$signature_with_params = explode(';', $signature_b64);
+		$signature = $signature_with_params[0];
+
+		// Decode header (JWT uses base64url encoding)
+		$header = $this->base64_url_decode($header_b64);
+		if ($header === false) {
+			$this->error_message = "base64_url_decode failed for header";
+			return false;
+		}
+
+		// Decode payload (JWT uses base64 url encoding)
+		$payload = $this->base64_url_decode($payload_b64);
+		if ($payload === false) {
+			$this->error_message = "base64_url_decode failed for payload";
+			return false;
+		}
+
+		// Decode payload
+		$payload_json = json_decode($payload, true);
+		if (json_last_error() !== JSON_ERROR_NONE) {
+			$this->error_message = "Decode payload failed: " . json_last_error_msg();
+			return false;
+		}
+
+		// Decode the header
+		$header_json = json_decode($header, true);
+		if (json_last_error() !== JSON_ERROR_NONE) {
+			$this->error_message = "json decode failed for header: " . json_last_error_msg();
+			return false;
+		}
+
+		// Verify PASSporT type
+		if (!isset($header_json['typ']) || $header_json['typ'] !== 'passport') {
+			$this->error_message = "Verify type invalid";
+			return false;
+		}
+
+		// Verify PASSporT extension type
+		if (!isset($header_json['ppt']) || $header_json['ppt'] !== 'shaken') {
+			$this->error_message = "Verify extension type invalid";
+			return false;
+		}
+
+		// Verify algorithm
+		if (!isset($header_json['alg']) || $header_json['alg'] !== 'ES256') {
+			$this->error_message = "Verify algorithm invalid";
+			return false;
+		}
+
+		// Verify certificate
+		if (!isset($header_json['x5u'])) {
+			$this->error_message = "Verify certificate URL missing";
+			return false;
+		}
+
+		// Get the certificate from the header
+		$header_certificate_url = $header_json['x5u'];
+		$this->error_message = "Certificate URL: " . $header_certificate_url;
+
+		// Download certificate
+		$header_certificate_string = file_get_contents($header_certificate_url);
+		if ($header_certificate_string === false) {
+			$this->error_message = "Failed to download certificate from: " . $header_certificate_url;
+			return false;
+		}
+
+		// Decode payload
+		$payload_json = json_decode($payload, true);
+		if (json_last_error() !== JSON_ERROR_NONE) {
+			$this->error_message = "Decode payload failed: " . json_last_error_msg();
+			return false;
+		}
+
+		// Attestation missing
+		if (empty($payload_json['attest'])) {
+			$this->error_message = "Attestation missing";
+			return false;
+		}
+
+		// Verify signature - The JWT signature is computed over ASCII(base64url(header) || '.' || base64url(payload))
+		$this->error_message = "Verifying signature...";
+		$secret = $header_certificate_string;
+		$signing_input = $header_b64 . '.' . $payload_b64;
+
+		// Read certificate from secret (which is the certificate content)
+		$certificate = openssl_x509_read($secret);
+		if (!$certificate) {
+			$this->error_message = "Failed to read certificate.";
+			return false;
+		}
+
+		// Extract public key from certificate
+		$public_key = openssl_pkey_get_public($certificate);
+		if (!$public_key) {
+			$this->error_message = "Failed to extract public key.";
+			return false;
+		}
+
+		// Convert JWT P1363 signature (raw R||S) to DER format required by OpenSSL
+		$sig_der = $this->p1363_to_der($this->base64_url_decode($signature));
+
+		// Verify the signature
+		$result = openssl_verify($signing_input, $sig_der, $public_key, OPENSSL_ALGO_SHA256);
+
+		// Free the key from memory (openssl_free_key is deprecated in PHP 8+)
+		unset($public_key);
+
+		// Check for errors
+		$error = '';
+		while ($msg = openssl_error_string()) {
+			$error .= $msg;
+		}
+
+		if (!empty($error)) {
+			$this->error_message = "OpenSSL errors: " . $error;
+		}
+
+		// Return result
+		if ($result == 1) {
+			$this->attest_level = $payload_json['attest'];
+			$this->error_message = "";
+			return true;
+		} elseif ($result === 0) {
+			$this->error_message = "Signature is invalid.";
+			return false;
+		} else {
+			$this->error_message = "Error checking signature.";
+			return false;
+		}
+	}
+
+	/**
+	 * Build PASSporT header
+	 */
+	private function build_header(): array {
+		return [
+			'alg' => $this->algorithm,
+			'ppt' => 'shaken',
+			'typ' => 'passport',
+			'x5u' => $this->certificate_url
+		];
+	}
+
+	/**
+	 * Build PASSporT payload
+	 */
+	private function build_payload(string $orig_tn, string $dest_tn, string $attest, int $iat, string $origid): array {
+		$payload = [
+			'attest' => $attest,
+			'dest' => ['tn' => [$dest_tn]],
+			'iat' => $iat,
+			'orig' => ['tn' => $orig_tn],
+			'origid' => $origid
+		];
+
+		return $payload;
+	}
+
+	/**
+	 * Sign the PASSporT token
+	 */
+	private function sign_passport(array $header, array $payload): array {
+		// Encode header and payload to base64url
+		$encoded_header = $this->base64_url_encode(json_encode($header));
+		$encoded_payload = $this->base64_url_encode(json_encode($payload));
+
+		// Create signing input
+		$signing_input = $encoded_header . '.' . $encoded_payload;
+
+		// Load private key
+		$private_key = $this->load_private_key();
+		if ($private_key === false) {
+			return ['passport' => '', 'error' => 'Failed to load private key'];
+		}
+
+		// Sign with ECDSA SHA256
+		$signature = '';
+		if (!openssl_sign($signing_input, $signature, $private_key, OPENSSL_ALGO_SHA256)) {
+			$error = openssl_error_string();
+			openssl_pkey_free($private_key);
+			return ['passport' => '', 'error' => 'Signing failed: ' . $error];
+		}
+
+		// Convert DER signature to raw R||S format (IEEE P1363)
+		$raw_signature = $this->der_to_raw($signature);
+		if ($raw_signature === false) {
+			openssl_pkey_free($private_key);
+			return ['passport' => '', 'error' => 'Failed to convert signature format'];
+		}
+
+		// Clean up private key
+		openssl_pkey_free($private_key);
+
+		// Encode signature to base64url
+		$encoded_signature = $this->base64_url_encode($raw_signature);
+
+		// Create compact JWS
+		$passport = $signing_input . '.' . $encoded_signature;
+
+		return ['passport' => $passport, 'error' => null];
+	}
+
+	/**
+	 * Load private key from file
+	 */
+	private function load_private_key() {
+		if (empty($this->private_key_path)) {
+			return false;
+		}
+
+		$key_content = file_get_contents($this->private_key_path);
+		if ($key_content === false) {
+			return false;
+		}
+
+		return openssl_pkey_get_private($key_content);
+	}
+
+	/**
+	 * Generate SIP Identity header from PASSporT
+	 *
+	 * Format: Identity: <PASSporT>;info="<certificate_url>;alg=ES256;ppt=shaken"
+	 *
+	 * @param string $passport The signed PASSporT token
+	 * @return string The complete SIP Identity header value
+	 */
+	public function build_identity_header(string $passport): string {
+		$info_part = urlencode($this->certificate_url) . ';alg=' . $this->algorithm . ';ppt=shaken';
+		return $passport . ';info="' . $info_part . '"';
+	}
+
+	/**
+	 * Generate a complete SIP Identity header
+	 *
+	 * @param string $orig_tn Originator phone number
+	 * @param string $dest_tn Destination phone number
+	 * @param string $attest_level Attestation level
+	 * @return array ['Identity' => string, 'error' => string|null]
+	 */
+	public function sign_and_build_header(string $orig_tn, string $dest_tn, string $attest_level = ''): array {
+		// Sign the call
+		$sign_result = $this->sign_call($orig_tn, $dest_tn, $attest_level);
+
+		if (!empty($sign_result['error'])) {
+			return ['Identity' => '', 'error' => $sign_result['error']];
+		}
+
+		// Build SIP Identity header
+		$identity_header = $this->build_identity_header($sign_result['passport']);
+
+		return ['Identity' => $identity_header, 'error' => null];
+	}
+
+	/**
+	 * Base64url encode (RFC 7515)
+	 */
+	public function base64_url_encode(string $data): string {
+		return rtrim(strtr(base64_encode($data), '+/', '-_'), '=');
+	}
+
+	/**
+	 * Base64url decode (RFC 7515)
+	 */
+	public function base64_url_decode(string $data): string {
+		$padding = 4 - (strlen($data) % 4);
+		if ($padding !== 4) {
+			$data .= str_repeat('=', $padding - 1);
+		}
+		return base64_decode(strtr($data, '-_', '+/'));
+	}
+
+	/**
+	 * Convert DER-encoded ECDSA signature to raw R||S format
+	 *
+	 * Parses the ASN.1 DER structure and extracts the R and S components.
+	 * Automatically detects P-256 (32 bytes each) or P-384 (48 bytes each) curves.
+	 */
+	private function der_to_raw(string $der): string|false {
+		$pos = 0;
+
+		// Check for SEQUENCE tag (0x30)
+		if (ord($der[$pos++]) !== 0x30) {
+			return false;
+		}
+
+		// Read sequence length (handle both short and long form)
+		$seq_len = ord($der[$pos++]);
+		if ($seq_len > 127) {
+			// Long form: next byte indicates number of length bytes
+			$num_len_bytes = $seq_len - 128;
+			$seq_len = 0;
+			for ($i = 0; $i < $num_len_bytes; $i++) {
+				$seq_len = ($seq_len << 8) + ord($der[$pos++]);
+			}
+		}
+
+		// Read R INTEGER
+		if (ord($der[$pos++]) !== 0x02) {
+			return false;
+		}
+		$r_len = ord($der[$pos++]);
+		$r = substr($der, $pos, $r_len);
+		$pos += $r_len;
+
+		// Read S INTEGER
+		if (ord($der[$pos++]) !== 0x02) {
+			return false;
+		}
+		$s_len = ord($der[$pos++]);
+		$s = substr($der, $pos, $s_len);
+
+		// Detect curve size based on actual key material
+		// P-256: 32 bytes each, P-384: 48 bytes each
+		$max_len = max(strlen($r), strlen($s));
+		$curve_size = ($max_len <= 32) ? 32 : 48;
+
+		// Pad R and S to the detected curve size
+		$r = str_pad($r, $curve_size, "\x00", STR_PAD_LEFT);
+		$s = str_pad($s, $curve_size, "\x00", STR_PAD_LEFT);
+
+		if (strlen($r) !== $curve_size || strlen($s) !== $curve_size) {
+			return false;
+		}
+
+		return $r . $s;
+	}
+
+	/**
+	* Convert a raw IEEE P1363 ECDSA signature (R || S) to DER/ASN.1 format.
+	* Supports both P-256 (64 bytes) and P-384 (96 bytes) curves.
+	*/
+	function p1363_to_der($signature) {
+		$sig_len = strlen($signature);
+
+		// Support both P-256 (64 bytes) and P-384 (96 bytes)
+		if ($sig_len !== 64 && $sig_len !== 96) {
+			throw new Exception("Expected 64-byte (P-256) or 96-byte (P-384) signature, got {$sig_len}");
+		}
+
+		// Determine bytes per component (32 for P-256, 48 for P-384)
+		$bytes_per_component = $sig_len / 2;
+		$r = ltrim(substr($signature, 0, $bytes_per_component), "\x00");
+		$s = ltrim(substr($signature, $bytes_per_component, $bytes_per_component), "\x00");
+
+		if ($r === '') $r = "\x00";
+		if ($s === '') $s = "\x00";
+
+		// Handle leading 0x00 for positive integers
+		if (ord($r[0]) >= 0x80) $r = "\x00" . $r;
+		if (ord($s[0]) >= 0x80) $s = "\x00" . $s;
+
+		$r_len = strlen($r);
+		$s_len = strlen($s);
+
+		$seq = "\x02" . chr(strlen($r)) . $r . "\x02" . chr(strlen($s)) . $s;
+		return "\x30" . chr(strlen($seq)) . $seq;
+	}
+
+    /**
+	 * Generates a unique identifier (UUID) based on the operating system.
+	 *
+	 * This function tries to generate a UUID using platform-specific methods:
+	 * - On FreeBSD, it uses `uuidgen`.
+	 * - On Linux, it first attempts to read from `/proc/sys/kernel/random/uuid`, then falls back to `uuidgen`.
+	 * - On Windows, it uses the `com_create_guid()` function.
+	 *
+	 * If none of these methods succeed, an error message is displayed, and the script exits.
+	 *
+	 * @return string The generated UUID as a string.
+	 */
+	private function generate_uuid(): string {
+		$uuid = null;
+		if (PHP_OS === 'FreeBSD') {
+			$uuid = trim(shell_exec("uuidgen"));
+			if (is_uuid($uuid)) {
+				return $uuid;
+			} else {
+				echo "Please install uuidgen.\n";
+				exit;
+			}
+		}
+		if (PHP_OS === 'Linux') {
+			$uuid = trim(file_get_contents('/proc/sys/kernel/random/uuid'));
+			if (is_uuid($uuid)) {
+				return $uuid;
+			} else {
+				$uuid = trim(shell_exec("uuidgen"));
+				if (is_uuid($uuid)) {
+					return $uuid;
+				} else {
+					echo "Please install uuidgen.\n";
+					exit;
+				}
+			}
+		}
+		if ((strtoupper(substr(PHP_OS, 0, 3)) === 'WIN') && function_exists('com_create_guid')) {
+			$uuid = trim(com_create_guid(), '{}');
+			if (is_uuid($uuid)) {
+				return $uuid;
+			} else {
+				echo "The com_create_guid() function failed to create a uuid.\n";
+				exit;
+			}
+		}
+		return '';
+	}
+
+	/**
+	 * Generate a self-signed certificate and private key for testing
+	 *
+	 * WARNING: This should only be used for development/testing.
+	 * In production, use certificates signed by a trusted STIR/SHAKEN CA.
+	 *
+	 * Note: This method uses openssl command-line tool for key generation
+	 * to support P-256 (ES256) properly across all OpenSSL versions.
+	 *
+	 * @param string $output_dir Directory to save key and certificate
+	 * @param string $common_name Common name for the certificate
+	 * @return array ['private_key_path' => string, 'certificate_path' => string, 'error' => string|null]
+	 */
+	public function generate_test_certificates(string $output_dir, string $common_name = 'STIR Test'): array {
+		// Create output directory if it doesn't exist
+		if (!is_dir($output_dir)) {
+			if (!mkdir($output_dir, 0755, true)) {
+				return ['private_key_path' => '', 'certificate_path' => '',
+						'error' => 'Failed to create output directory'];
+			}
+		}
+
+		// Define the certificate path
+		$private_key_path = $output_dir . '/identity_private.key';
+		$certificate_path = $output_dir . '/identity_certificate.pem';
+
+		// Use OpenSSL command-line to generate EC P-256 key (more compatible)
+		$cmd = sprintf(
+			'openssl ecparam -name prime256v1 -genkey -noout -out %s 2>/dev/null',
+			escapeshellarg($private_key_path)
+		);
+		$exec_result = exec($cmd, $output, $return_code);
+
+		if ($return_code !== 0 || !file_exists($private_key_path)) {
+			// Fallback: try to use PHP's openssl_pkey_new with P-384
+			// Note: P-384 uses ES384 algorithm, not ES256
+			$config_array = array(
+				"private_key_bits" => 384,
+				"private_key_type" => OPENSSL_KEYTYPE_EC,
+				"digest_alg" => "sha256"
+			);
+
+			$private_key = openssl_pkey_new($config_array);
+			if (!$private_key) {
+				return ['private_key_path' => '', 'certificate_path' => '',
+						'error' => 'Failed to generate private key (both command-line and PHP methods failed): ' . openssl_error_string()];
+			}
+
+			// Export private key with P-384
+			$private_key_pem = '';
+			openssl_pkey_export($private_key, $private_key_pem);
+			if (!file_put_contents($private_key_path, $private_key_pem)) {
+				return ['private_key_path' => '', 'certificate_path' => '',
+						'error' => 'Failed to write private key file'];
+			}
+			chmod($private_key_path, 0600);
+		}
+
+		// Load the private key for certificate generation
+		$private_key_pem = file_get_contents($private_key_path);
+		if (!$private_key_pem) {
+			return ['private_key_path' => '', 'certificate_path' => '',
+					'error' => 'Failed to read generated private key'];
+		}
+
+		$private_key = openssl_pkey_get_private($private_key_pem);
+		if (!$private_key) {
+			return ['private_key_path' => '', 'certificate_path' => '',
+					'error' => 'Failed to load private key: ' . openssl_error_string()];
+		}
+
+		// Generate certificate signing request
+		$csr = openssl_csr_new([
+			'commonName' => $common_name,
+			'organizationName' => 'Test Organization',
+			'countryName' => 'US',
+			'stateOrProvinceName' => 'Test State'
+		], $private_key);
+
+		if (!$csr) {
+			openssl_pkey_free($private_key);
+			return ['private_key_path' => $private_key_path, 'certificate_path' => '',
+					'error' => 'Failed to generate CSR: ' . openssl_error_string()];
+		}
+
+		// Create self-signed certificate (valid for 365 days)
+		$certificate = openssl_csr_sign($csr, null, $private_key, 365, array());
+		if (!$certificate) {
+			openssl_pkey_free($private_key);
+			return ['private_key_path' => $private_key_path, 'certificate_path' => '',
+					'error' => 'Failed to sign certificate: ' . openssl_error_string()];
+		}
+
+		openssl_pkey_free($private_key);
+
+		// Export certificate
+		$certificate_pem = openssl_x509_export($certificate, $cert_str);
+		if (!file_put_contents($certificate_path, $cert_str)) {
+			return ['private_key_path' => $private_key_path, 'certificate_path' => '',
+					'error' => 'Failed to write certificate file'];
+		}
+
+		return [
+			'private_key_path' => $private_key_path,
+			'certificate_path' => $certificate_path,
+			'error' => null
+		];
+	}
+}
