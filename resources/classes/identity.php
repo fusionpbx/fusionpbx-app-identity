@@ -1,4 +1,5 @@
 <?php
+
 /**
  * STIR/SHAKEN Call Sign and Verify Module for FusionPBX
  *
@@ -8,15 +9,6 @@
  * RFC 8225 - PASSporT (PASSport for Telephone Identity)
  * RFC 8228 - Authentication, Authorization, and Accounting for the
  *			Secure Telephone Identity (STI)
- */
-/**
- * Identity STIR/SHAKEN PASSporT signing and verification.
- *
- * Signs outgoing phone calls with STIR/SHAKEN PASSporT tokens to authenticate
- * call origins and prevent caller ID spoofing. Implements RFC 8225 (PASSporT) and
- * RFC 8228 (Authentication, Authorization, and Accounting for STI).
- *
- * @license See LICENSE file
  */
 class identity {
 
