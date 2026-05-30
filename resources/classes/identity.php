@@ -583,7 +583,7 @@ class identity {
 
 		return $r . $s;
 	}
-	
+
 	/**
 	 * Convert IEEE P1363 ECDSA signature to DER/ASN.1 format.
 	 *
