@@ -451,15 +451,17 @@ class identity {
 	 * parameters including certificate URL, algorithm, and passport type indicator.
 	 * Format: PASSporT;info="certificate_url;alg=ES256;ppt=shaken"
 	 *
-	 * @param string $passport The signed PASSporT JWT token
+	 	 * @param string $passport The signed PASSporT JWT token
 	 *
 	 * @return string The complete SIP Identity header value
-	 */
-	public function build_identity_header(string $passport): string {
-		$info_part = urlencode($this->certificate_url) . ';alg=' . $this->algorithm . ';ppt=shaken';
-		return $passport . ';info="' . $info_part . '"';
+ */
+ public function build_identity_header(string $passport): string {
+		return $passport
+		. ';info=<' . $this->certificate_url . '>'
+		. ';alg=' . $this->algorithm
+		. ';ppt=shaken';
 	}
-
+	
 	/**
 	 * Sign call and create complete SIP Identity header.
 	 *
