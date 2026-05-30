@@ -456,8 +456,13 @@ class identity {
 	 * @return string The complete SIP Identity header value
 	 */
 	public function build_identity_header(string $passport): string {
-		$info_part = urlencode($this->certificate_url) . ';alg=' . $this->algorithm . ';ppt=shaken';
-		return $passport . ';info="' . $info_part . '"';
+		return $passport
+			. ';info=<'
+			. $this->certificate_url
+			. '>'
+			. ';alg='
+			. $this->algorithm
+			. ';ppt=shaken';
 	}
 
 	/**
