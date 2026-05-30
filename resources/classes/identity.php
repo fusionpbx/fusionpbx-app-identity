@@ -564,7 +564,11 @@ class identity {
 		$s_len = ord($der[$pos++]);
 		$s = substr($der, $pos, $s_len);
 
-		// Detect curve size based on actual key material
+		// Strip DER's leading 0x00 sign-bit padding before measuring
+		$r = ltrim($r, "\x00");
+		$s = ltrim($s, "\x00");
+
+		// Detect curve size based on actual integer length
 		// P-256: 32 bytes each, P-384: 48 bytes each
 		$max_len = max(strlen($r), strlen($s));
 		$curve_size = ($max_len <= 32) ? 32 : 48;
@@ -579,7 +583,7 @@ class identity {
 
 		return $r . $s;
 	}
-
+	
 	/**
 	 * Convert IEEE P1363 ECDSA signature to DER/ASN.1 format.
 	 *
