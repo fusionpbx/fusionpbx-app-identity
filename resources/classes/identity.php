@@ -454,7 +454,7 @@ class identity {
 	 * @param string $passport The signed PASSporT JWT token
 	 *
 	 * @return string The complete SIP Identity header value
-	*/
+	 */
 	public function build_identity_header(string $passport): string {
 		return $passport
 			. ';info=<'
