@@ -54,5 +54,6 @@ Add the following to your outbound route to sign outbound calls.
 ```
 <action application="unset" data="sip_h_Identity"/>
 <action application="curl" data="http://127.0.0.1/app/identity/sign.php POST source=${effective_caller_id_number}&destination=1$1"/>
+<action application="export" data="exclude_outgoing_extra_header=sip_h_Identity"/>
 <action application="set" data="sip_h_Identity=${curl_response_data}"/>
 ```
